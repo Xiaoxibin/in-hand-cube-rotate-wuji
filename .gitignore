@@ -64,6 +64,9 @@ Thumbs.db
 
 # Others
 data/
+docs/
+MyReadMe.md
+pyproject.toml.bak
 
 MyReadMe.md
 pyproject.toml.bak
