@@ -51,6 +51,7 @@ runs/
 checkpoints/
 wandb/
 tensorboard/
+docs/
 
 # System
 .DS_Store
@@ -63,3 +64,6 @@ Thumbs.db
 
 # Others
 data/
+
+MyReadMe.md
+pyproject.toml.bak
