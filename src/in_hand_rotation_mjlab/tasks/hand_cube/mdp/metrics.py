@@ -18,13 +18,62 @@ _DEFAULT_CUBE_CFG = SceneEntityCfg("cube")
 
 
 def contact_found_mean(
-  env: ManagerBasedRlEnv,
-  sensor_name: str,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
 ) -> torch.Tensor:
-  """Mean raw `found` value across sensor primaries for each environment."""
-  sensor: ContactSensor = env.scene[sensor_name]
-  assert sensor.data.found is not None
-  return sensor.data.found.float().mean(dim=-1)
+    """Mean raw `found` value across sensor primaries for each environment."""
+    sensor: ContactSensor = env.scene[sensor_name]
+    assert sensor.data.found is not None
+
+# --------------------------------------------------------
+    # Temporary contact debug
+    # --------------------------------------------------------
+    # if not hasattr(env, "_contact_debug_step"):
+    #     env._contact_debug_step = 0
+
+    # env._contact_debug_step += 1
+
+    # if env._contact_debug_step % 100 == 0:
+    #     data = env.sim.data.struct
+    #     model = env.sim.mj_model
+
+    #     print("\n========== CONTACT DEBUG ==========")
+    #     print("step:", env._contact_debug_step)
+
+    #     print("found:", sensor.data.found[:1])
+
+    #     # Warp arrays -> NumPy
+    #     nacon_np = data.nacon.numpy()
+    #     geom_np = data.contact.geom.numpy()
+    #     dist_np = data.contact.dist.numpy()
+
+    #     ncon = int(nacon_np[0])
+
+    #     print("nacon:", nacon_np)
+    #     print("ncollision:", data.ncollision)
+
+    #     print("\nActive contacts:")
+
+    #     for i in range(ncon):
+    #         geom1 = int(geom_np[i, 0])
+    #         geom2 = int(geom_np[i, 1])
+    #         dist = float(dist_np[i])
+
+    #         name1 = model.geom(geom1).name
+    #         name2 = model.geom(geom2).name
+
+    #         print(
+    #             f"  contact[{i}]: "
+    #             f"geom[{geom1}]={name1} "
+    #             f"<-> "
+    #             f"geom[{geom2}]={name2} "
+    #             f"dist={dist:.6e}"
+    #         )
+
+    #     print("==================================\n")
+
+
+    return sensor.data.found.float().mean(dim=-1)
 
 
 def contact_found_max(
@@ -104,11 +153,16 @@ class object_rotation_progress:
     target_yaw_rate: float = 0.20,
     position_threshold: float = 0.02,
     tilt_threshold: float = 0.35,
+    negate_yaw_rate: bool = True,
   ) -> torch.Tensor:
     del env, asset_cfg  # Bound once in __init__.
 
-    # Positive score for target clockwise rotation direction in this task.
-    yaw_rate = -self._asset.data.root_link_ang_vel_w[:, 2]
+    # Rotation direction convention matches the reward term:
+    # negate_yaw_rate=True (left hand): clockwise is positive.
+    # negate_yaw_rate=False (right hand): counter-clockwise is positive.
+    yaw_rate = self._asset.data.root_link_ang_vel_w[:, 2]
+    if negate_yaw_rate:
+      yaw_rate = -yaw_rate
     yaw_score = torch.clamp(yaw_rate / max(target_yaw_rate, 1e-6), min=0.0, max=1.0)
 
     pos_w = self._asset.data.root_link_pos_w
