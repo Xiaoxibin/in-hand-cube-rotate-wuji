@@ -37,7 +37,7 @@ class CollectConfig:
   # Stability filters
   lin_vel_threshold: float = 0.08
   ang_vel_threshold: float = 1.2
-  palm_center_geom_expr: str = "palm_collision_.*"
+  palm_center_geom_expr: str | None = None
   max_palm_distance: float = 0.14
   min_cube_height: float = 0.05
 

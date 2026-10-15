@@ -211,6 +211,9 @@ def run_play(task_id: str, cfg: PlayConfig):
   else:
     resolved_viewer = cfg.viewer
 
+
+
+
   if resolved_viewer == "native":
     NativeMujocoViewer(env, policy).run()
   elif resolved_viewer == "viser":

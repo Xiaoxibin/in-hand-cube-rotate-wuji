@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -8,7 +9,7 @@ from mjlab.entity import Entity
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
-from mjlab.utils.lab_api.math import euler_xyz_from_quat, wrap_to_pi
+from mjlab.utils.lab_api.math import euler_xyz_from_quat, quat_apply, wrap_to_pi
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -61,6 +62,16 @@ class object_yaw_finite_diff_clipped:
   Optionally, the yaw reward is multiplied by a drift factor based on object
   translation and roll/pitch deviation from reset pose. This suppresses reward
   when the cube drifts via non-target motion.
+
+  Additionally, ``negative_yaw_rate_penalty`` (>1.0) makes backward yaw rates
+  more costly than forward rates are rewarding, discouraging the
+  "rotate forward / slip back" limit cycle. Default 1.0 keeps the original
+  symmetric clipping behavior. The drift gate discounts only positive rewards;
+  backward penalties apply at full strength even when the cube drifts.
+
+  ``tumble_penalty_weight`` (>0) charges for the cube's angular velocity
+  component NOT aligned with the cube's own z axis (tumbling vs in-hand
+  spinning), penalizing flip-into-jam failure modes immediately.
   """
 
   def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
@@ -108,8 +119,12 @@ class object_yaw_finite_diff_clipped:
     object_name: str,
     clip_min: float = -0.25,
     clip_max: float = 0.25,
+    low_rate_boost: float = 1.0,
     history_steps: int | None = None,
     negate_yaw_rate: bool = True,
+    negative_yaw_rate_penalty: float = 1.0,
+    tumble_penalty_weight: float = 0.0,
+    tumble_dead_zone: float = 0.0,
     drift_position_threshold: float = 0.02,
     drift_tilt_threshold: float = 0.35,
     drift_inside_factor: float = 1.0,
@@ -150,10 +165,53 @@ class object_yaw_finite_diff_clipped:
     yaw_rate = avg_delta_yaw / max(env.step_dt, 1e-6)
     if negate_yaw_rate:
       yaw_rate = -yaw_rate
-    yaw_reward = torch.clamp(yaw_rate, min=clip_min, max=clip_max)
+    # Asymmetric penalty: clamp FIRST, then scale negative rewards up. Doing it
+    # in this order keeps fast backward slips penalized beyond the forward
+    # saturation level (-0.25 * penalty vs +0.25), so "rotate forward / slip
+    # back" cycles are strictly unprofitable. Multiplying before clamping
+    # would saturate fast slips back at -clip_min and only affect slow ones.
+    # low_rate_boost > 1 raises the reward slope in the slow-spinning regime
+    # (below clip_max / low_rate_boost), so early gains in rotation speed pay
+    # off immediately instead of being flattened by the saturation. With the
+    # default 1.0 this is identical to plain clamping.
+    if low_rate_boost != 1.0:
+      boosted = torch.clamp(yaw_rate * low_rate_boost, min=0.0, max=clip_max)
+      yaw_reward = torch.where(
+        yaw_rate >= 0.0,
+        boosted,
+        torch.clamp(yaw_rate, min=clip_min, max=0.0),
+      )
+    else:
+      yaw_reward = torch.clamp(yaw_rate, min=clip_min, max=clip_max)
+    if negative_yaw_rate_penalty != 1.0:
+      yaw_reward = torch.where(
+        yaw_reward < 0.0, yaw_reward * negative_yaw_rate_penalty, yaw_reward
+      )
 
     cube: Entity = self._env.scene[self.object_name]
     roll, pitch, _ = euler_xyz_from_quat(cube.data.root_link_quat_w)
+
+    # Tumble penalty: decompose the cube's world-frame angular velocity into
+    # the component about the cube's own z axis (in-hand spin, the target
+    # motion) and the remainder (tumbling about x/y, the failure mode that
+    # wedges the cube into a jammed pose). The reward gains a per-step cost
+    # proportional to the tumble magnitude, so a quarter-flip costs from the
+    # very first step instead of only after the drift gate notices.
+    # ``tumble_dead_zone`` exempts micro-jitter from passive settling
+    # (measured ~0.1 rad/s while holding still), so a stationary grasp
+    # doesn't pay a constant penalty.
+    if tumble_penalty_weight > 0.0:
+      cube_ang_vel_w = cube.data.root_link_ang_vel_w
+      cube_quat_w = cube.data.root_link_quat_w
+      z_axis = torch.zeros_like(cube_ang_vel_w)
+      z_axis[:, 2] = 1.0
+      cube_z_axis_w = quat_apply(cube_quat_w, z_axis)
+      spin_rate = (cube_ang_vel_w * cube_z_axis_w).sum(dim=-1, keepdim=True)
+      tumble_rate = cube_ang_vel_w - spin_rate * cube_z_axis_w
+      tumble_mag = torch.norm(tumble_rate, dim=-1) - tumble_dead_zone
+      tumble_cost = tumble_penalty_weight * torch.clamp(tumble_mag, min=0.0)
+      yaw_reward = yaw_reward - tumble_cost
+
     pos_error = torch.linalg.vector_norm(
       cube.data.root_link_pos_w - self._init_pos_w, dim=-1
     )
@@ -186,6 +244,14 @@ class object_yaw_finite_diff_clipped:
 
     drift_factor = torch.where(
       self._has_init, drift_factor, torch.ones_like(drift_factor)
+    )
+    # One-sided drift gate: only discount POSITIVE yaw rewards when the cube
+    # drifts. Backward (penalty) rewards stay at full strength regardless of
+    # drift, so slipping while drifting cannot be excused by the gate.
+    drift_factor = torch.where(
+      yaw_reward >= 0.0,
+      drift_factor,
+      torch.ones_like(drift_factor),
     )
     return yaw_reward * drift_factor
 
@@ -298,3 +364,180 @@ class pose_diff_l2_from_reset:
     if normalize and clip_max is not None and clip_max > 0.0:
       val = val / clip_max
     return val
+
+
+class object_pose_deviation_l2:
+  """Penalize cube pose drift (position + roll/pitch tilt) from episode reset.
+
+  This closes the reward gap that let the policy profit from pushing the cube
+  into the radial-side pocket (MCT_CMC3/MCPI1/finger-root groove): no existing
+  reward term directly charges for cube position drift, and the curriculum
+  penalties (which only touch joints/object velocity) stay at weight_min
+  until the rotation-progress curriculum activates. This term is active from
+  step 0 and has no curriculum, so drifting into the pocket carries a
+  continuous per-step cost at every stage of training.
+
+  The penalty is linear in each error component (not squared) so that the
+  marginal cost of drifting deeper into the pocket stays constant instead of
+  saturating the gradient far away from reset.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    self._env = env
+    self._init_pos_w = torch.zeros((env.num_envs, 3), device=env.device)
+    self._init_roll = torch.zeros(env.num_envs, device=env.device)
+    self._init_pitch = torch.zeros(env.num_envs, device=env.device)
+    self._has_init = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None):
+    if env_ids is None:
+      env_ids = slice(None)
+    cube: Entity = self._env.scene["cube"]
+    pos_w = cube.data.root_link_pos_w
+    roll, pitch, _ = euler_xyz_from_quat(cube.data.root_link_quat_w)
+    self._init_pos_w[env_ids] = pos_w[env_ids]
+    self._init_roll[env_ids] = roll[env_ids]
+    self._init_pitch[env_ids] = pitch[env_ids]
+    self._has_init[env_ids] = True
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    object_name: str = "cube",
+    position_weight: float = 1.0,
+    tilt_weight: float = 0.2,
+    position_threshold: float = 0.005,
+    tilt_threshold: float = 0.05,
+  ) -> torch.Tensor:
+    del object_name  # Cube is bound in reset(); kept for cfg symmetry.
+
+    cube: Entity = self._env.scene["cube"]
+    pos_w = cube.data.root_link_pos_w
+    roll, pitch, _ = euler_xyz_from_quat(cube.data.root_link_quat_w)
+
+    pos_error = torch.linalg.vector_norm(pos_w - self._init_pos_w, dim=-1)
+    roll_error = wrap_to_pi(roll - self._init_roll).abs()
+    pitch_error = wrap_to_pi(pitch - self._init_pitch).abs()
+    tilt_error = torch.linalg.vector_norm(
+      torch.stack([roll_error, pitch_error], dim=-1), dim=-1
+    )
+
+    # Dead-zone below the thresholds: small in-hand jiggle while rotating is
+    # free, only genuine drift toward the pocket is charged.
+    pos_excess = torch.clamp(pos_error - position_threshold, min=0.0)
+    tilt_excess = torch.clamp(tilt_error - tilt_threshold, min=0.0)
+
+    cost = position_weight * pos_excess + tilt_weight * tilt_excess
+    return torch.where(self._has_init, cost, torch.zeros_like(cost))
+
+
+class object_cumulative_yaw:
+  """Reward for ACCUMULATED rotation angle, not instantaneous rate.
+
+  The rate-based ``object_yaw_finite_diff_clipped`` pays for "spinning fast
+  right now" but has no memory: a policy that wiggles or spins very slowly
+  (0.02 rad/s, invisible over a 20 s episode) earns the same as one that
+  truly turns the cube. This term pays for progress that a human can SEE:
+  the signed yaw integral since episode start, unwrapped, with a configurable
+  dead-zone so that pure jiggle integrates to ~0.
+
+  Design properties:
+    - The integral is SIGNED: backward rotation cancels earlier progress, so
+      "rotate forward / slip back" cycles earn nothing here either.
+    - Monotone in true rotation: the only way to accumulate score is to
+      actually turn the cube further than ever before in this episode.
+      There is no rate to game (unlike low-rate boosting of a clipped rate
+      reward, which let slow spins collect the same as fast ones).
+    - Optional drift gate: accumulated angle only pays while the cube stays
+      near its initial pose; drifting while turning stops the meter.
+    - Optional saturation per "lap" (2*pi) keeps the term bounded and makes
+      each additional full turn worth the same.
+
+  Reward shape: a STEP bonus each time the unwrapped integral crosses
+  ``step_angle`` (default quarter turn), scaled by the current drift gate.
+  Step bonuses (instead of a continuous payoff) make the reward robust to
+  the sampling rate of yaw crossing and give a crisp, countable event:
+  the policy literally gets paid per quarter-turn milestone reached.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    self.object_name = cfg.params["object_name"]
+    self._env = env
+    self._cum_yaw = torch.zeros(env.num_envs, device=env.device)
+    self._last_paid = torch.zeros(env.num_envs, device=env.device)
+    self._yaw_prev = torch.zeros(env.num_envs, device=env.device)
+    self._init_pos_w = torch.zeros((env.num_envs, 3), device=env.device)
+    self._init_roll = torch.zeros(env.num_envs, device=env.device)
+    self._init_pitch = torch.zeros(env.num_envs, device=env.device)
+    self._has_init = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None):
+    if env_ids is None:
+      env_ids = slice(None)
+    cube: Entity = self._env.scene[self.object_name]
+    yaw = self._current_yaw()
+    self._cum_yaw[env_ids] = 0.0
+    self._last_paid[env_ids] = 0.0
+    self._yaw_prev[env_ids] = yaw[env_ids]
+    pos_w = cube.data.root_link_pos_w
+    roll, pitch, _ = euler_xyz_from_quat(cube.data.root_link_quat_w)
+    self._init_pos_w[env_ids] = pos_w[env_ids]
+    self._init_roll[env_ids] = roll[env_ids]
+    self._init_pitch[env_ids] = pitch[env_ids]
+    self._has_init[env_ids] = True
+
+  def _current_yaw(self) -> torch.Tensor:
+    cube: Entity = self._env.scene[self.object_name]
+    _, _, yaw = euler_xyz_from_quat(cube.data.root_link_quat_w)
+    return yaw
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    object_name: str,
+    negate_yaw_rate: bool = True,
+    step_angle: float = math.pi / 2,
+    bonus: float = 1.0,
+    drift_position_threshold: float = 0.02,
+    drift_tilt_threshold: float = 0.35,
+    max_bonus_per_step: float = 1.5,
+  ) -> torch.Tensor:
+    del object_name  # Bound in __init__.
+
+    yaw = self._current_yaw()
+    # Re-anchor on the first post-reset step.
+    reset_mask = env.episode_length_buf <= 1
+    if torch.any(reset_mask):
+      self.reset(reset_mask.nonzero(as_tuple=False).squeeze(-1))
+
+    delta = wrap_to_pi(yaw - self._yaw_prev)
+    self._yaw_prev[:] = yaw
+    if negate_yaw_rate:
+      delta = -delta
+    self._cum_yaw += delta
+    # Pay a bonus for each new quarter-turn milestone beyond the last paid one.
+    progress = self._cum_yaw - self._last_paid
+    steps_paid = torch.clamp(
+      torch.floor(progress / step_angle), min=0.0
+    )
+    reward = steps_paid * bonus
+
+    # Drift gate: only pay while the cube stays near its initial pose.
+    cube: Entity = self._env.scene[self.object_name]
+    pos_w = cube.data.root_link_pos_w
+    roll, pitch, _ = euler_xyz_from_quat(cube.data.root_link_quat_w)
+    pos_error = torch.linalg.vector_norm(pos_w - self._init_pos_w, dim=-1)
+    roll_error = wrap_to_pi(roll - self._init_roll).abs()
+    pitch_error = wrap_to_pi(pitch - self._init_pitch).abs()
+    tilt_error = torch.linalg.vector_norm(
+      torch.stack([roll_error, pitch_error], dim=-1), dim=-1
+    )
+    in_bounds = (pos_error <= drift_position_threshold) & (
+      tilt_error <= drift_tilt_threshold
+    )
+    reward = torch.where(in_bounds, reward, torch.zeros_like(reward))
+    reward = torch.where(self._has_init, reward, torch.zeros_like(reward))
+
+    # Mark milestones as paid and cap the per-step payout.
+    self._last_paid += steps_paid * step_angle
+    return torch.clamp(reward, max=max_bonus_per_step)
