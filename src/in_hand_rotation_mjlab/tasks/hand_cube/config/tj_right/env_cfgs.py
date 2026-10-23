@@ -118,8 +118,8 @@ def _apply_tj_reward_tuning(cfg: ManagerBasedRlEnvCfg) -> None:
     # 1~2cm(口袋区)还留 ~30-50% 收入,槽内蹭转仍是正收益;50 时 1.2cm 处
     # 只剩 ~20%,口袋旋转严格劣于掌心旋转。
     # cfg.rewards["rotate_finite_diff"].params["drift_decay_k_pos"] = 30.0
-    cfg.rewards["rotate_finite_diff"].params["drift_decay_k_pos"] = 30.0 # 30.0
-    cfg.rewards["rotate_finite_diff"].params["drift_tilt_threshold"] = 0.35  # 0.15
+    cfg.rewards["rotate_finite_diff"].params["drift_decay_k_pos"] = 50.0 # 30.0(黄色) -> 50.0(蓝色)
+    cfg.rewards["rotate_finite_diff"].params["drift_tilt_threshold"] = 0.3  # 0.35(黄色) -> 0.3(蓝色)
 
     cfg.rewards["torque_penalty"].params["max_abs_torque"] = 1.0
     cfg.rewards["torque_penalty"].params["normalize"] = True
@@ -155,7 +155,7 @@ def _apply_tj_reward_tuning(cfg: ManagerBasedRlEnvCfg) -> None:
             # 中心在 1.0-1.2cm,0.014 可能仍在分布内过紧)。
             # "drift_position_threshold": 0.02,
             # "drift_position_threshold": 0.014,
-            "drift_position_threshold": 0.02, # 0.014
+            "drift_position_threshold": 0.016, # 0.02(黄色) -> 0.016(蓝色)
             "drift_tilt_threshold": 0.35,
             # "stall_penalty": 0.05,
             # "stall_steps_threshold": 25,

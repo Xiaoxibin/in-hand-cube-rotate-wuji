@@ -327,7 +327,11 @@ def make_hand_cube_inhand_rotate_env_cfg(
             params={
                 "object_name": "cube",
                 "clip_min": -0.25,
-                "clip_max": 0.35,#0.25
+                # 0.5(黄色) -> 0.35(蓝色). Note the forward reward saturates at
+                # clip_max / low_rate_boost = 0.35 / 2.0 = 0.175 rad/s, so
+                # raising clip_max alone does nothing unless low_rate_boost
+                # drops to 1.0 as well.
+                "clip_max": 0.35,#0.25 -> 0.35 -> 0.5 -> 0.35
                 # Smooth finite-difference yaw over recent steps.
                 "history_steps": 4,
                 # Multiplicative drift gate on non-yaw motion from reset pose.
@@ -351,26 +355,37 @@ def make_hand_cube_inhand_rotate_env_cfg(
 
         "object_linvel_penalty": RewardTermCfg(
             func=hand_cube_mdp.object_linvel_l1,
-            weight=-0.3,
+            # weight=-0.3,  # 旧值:课程 weight_max(随 progress 递增到此值)
+            # 固定为课程区间的温和中间值,不再随 rotation_progress 递增。
+            weight=-0.1,
             params={
                 "object_name": "cube",
             },
         ),
         "pose_diff_penalty": RewardTermCfg(
             func=hand_cube_mdp.pose_diff_l2_from_reset,
-            weight=-0.1,
+            # 状态型惩罚(每步都付,与动不动无关)与手内旋转本质上不兼容:
+            # 持续 regrasp 的策略永远回不到 home pose。它原本防"推进口袋"
+            # 的职责已由 cube_pose_drift_penalty(两区设计)接管,这里只留
+            # 象征性正则,防止关节漂到极限位。
+            # weight=-0.2, # -0.1  ← 旧值:过强,是 10-19 卡死的直接原因
+            weight=-0.02,
             params={
                 "asset_cfg": SceneEntityCfg(
                     "robot",
                     joint_names=(".*",),
                 ),
                 "average_per_joint": False,
-                "joint_tolerance": 0.15,
+                # "joint_tolerance": 0.15,  # 10-14 起用过,过窄禁掉了 regrasp
+                "joint_tolerance": 0.4,  # 0.4 -> 0.15 ->0.1 -> 回到 0.4
             },
         ),
         "torque_penalty": RewardTermCfg(
             func=hand_cube_mdp.joint_torque_l2,
-            weight=-0.1,
+            # weight=-0.1,  # 旧值:课程会把它推到 -1.0(动作成本随成功递增)
+            # 固定为中间值:TJ 调参层会开 normalize([0,1] 区间),-0.3 已够
+            # 压制暴力推挤,又不会让动手指变贵到冻结。
+            weight=-0.3,
             params={
                 "asset_cfg": SceneEntityCfg(
                     "robot",
@@ -380,7 +395,9 @@ def make_hand_cube_inhand_rotate_env_cfg(
         ),
         "work_penalty": RewardTermCfg(
             func=hand_cube_mdp.actuator_work_l2_penalty,
-            weight=-0.05,
+            # weight=-0.05,  # 旧值:课程会把它推到 -0.1
+            # 固定为中间值,同上,不再随 rotation_progress 递增。
+            weight=-0.03,
             params={
                 "asset_cfg": SceneEntityCfg(
                     "robot",
@@ -407,13 +424,22 @@ def make_hand_cube_inhand_rotate_env_cfg(
         # exempt normal in-hand rotation jiggle; only genuine drift is charged.
         "cube_pose_drift_penalty": RewardTermCfg(
             func=hand_cube_mdp.object_pose_deviation_l2,
-            weight=-1.5,
+            # Two-zone design (values matched to the 10-14_20-33 baseline that
+            # reached rot_prog 0.197): gentle slope inside the knee so rotation
+            # jitter stays cheap (the -1.5 flat slope made the policy press the
+            # thumb on the cube and stop rotating), steep slope beyond the knee
+            # so pocket-approach (pos_err > ~1.2cm) is expensive. Net cost at
+            # small drift matches the old -0.8/thr0.002 config; at 2cm+ drift
+            # it is ~2x steeper than that baseline.
+            weight=-1.0,
             params={
                 "object_name": "cube",
-                "position_weight": 1.0,
+                "position_weight": 0.8,
                 "tilt_weight": 1.0,
-                "position_threshold": 0.005,
+                "position_threshold": 0.002,
                 "tilt_threshold": 0.05,
+                "position_knee": 0.012,
+                "position_far_weight": 3.0,
             },
         ),
     }
@@ -454,6 +480,19 @@ def make_hand_cube_inhand_rotate_env_cfg(
         ),
         "nan": TerminationTermCfg(
             func=envs_mdp.nan_detection,
+        ),
+        # 卡死(冻结抓握)终止:最近 window_steps 步(50 步 = 2.5s)内去抖后
+        # 的净 yaw 转动 < min_yaw_delta 就提前终止。卡死 episode 的回报因此
+        # 显著变负(critic 学到该状态没有未来),占据率下降——比任何奖励
+        # 整形都干净。去抖阈值 per_step_epsilon 保证慢速真旋转不会被误杀。
+        "cube_stalled": TerminationTermCfg(
+            func=hand_cube_mdp.object_yaw_stalled,
+            params={
+                "window_steps": 50,
+                "min_yaw_delta": 0.05,
+                "per_step_epsilon": 0.0005,
+                "asset_cfg": SceneEntityCfg("cube"),
+            },
         ),
     }
 
@@ -498,58 +537,63 @@ def make_hand_cube_inhand_rotate_env_cfg(
     # -------------------------------------------------------------------------
 
     curriculum = {
-        "object_linvel_penalty_weight": CurriculumTermCfg(
-            func=hand_cube_mdp.reward_weight_by_metric_progress,
-            params={
-                "reward_name": "object_linvel_penalty",
-                "metric_name": "rotation_progress",
-                "progress_min": 0.05,
-                "progress_max": 0.25,
-                "weight_min": -0.03,
-                "weight_max": -0.3,
-                "ema_alpha": 0.08,
-                "weight_lerp": 0.15,
-            },
-        ),
-        "pose_diff_penalty_weight": CurriculumTermCfg(
-            func=hand_cube_mdp.reward_weight_by_metric_progress,
-            params={
-                "reward_name": "pose_diff_penalty",
-                "metric_name": "rotation_progress",
-                "progress_min": 0.05,
-                "progress_max": 0.25,
-                "weight_min": -0.01,
-                "weight_max": -0.1,
-                "ema_alpha": 0.08,
-                "weight_lerp": 0.15,
-            },
-        ),
-        "torque_penalty_weight": CurriculumTermCfg(
-            func=hand_cube_mdp.reward_weight_by_metric_progress,
-            params={
-                "reward_name": "torque_penalty",
-                "metric_name": "rotation_progress",
-                "progress_min": 0.05,
-                "progress_max": 0.25,
-                "weight_min": -0.1,
-                "weight_max": -1.0,
-                "ema_alpha": 0.08,
-                "weight_lerp": 0.15,
-            },
-        ),
-        "work_penalty_weight": CurriculumTermCfg(
-            func=hand_cube_mdp.reward_weight_by_metric_progress,
-            params={
-                "reward_name": "work_penalty",
-                "metric_name": "rotation_progress",
-                "progress_min": 0.05,
-                "progress_max": 0.25,
-                "weight_min": -0.01,
-                "weight_max": -0.1,
-                "ema_alpha": 0.08,
-                "weight_lerp": 0.15,
-            },
-        ),
+        # 反 curriculum 修复:原先四个惩罚课程都以 rotation_progress 为爬升
+        # 信号(progress 0.05→0.25 时权重涨 ~10 倍),策略越成功惩罚越重,
+        # 学会旋转后 regrasp 变贵 → 冻结(10-19 卡死的直接机制)。
+        # 全部移除,惩罚权重固定为温和中间值(在 rewards 字典里直接设置)。
+        #
+        # "object_linvel_penalty_weight": CurriculumTermCfg(
+        #     func=hand_cube_mdp.reward_weight_by_metric_progress,
+        #     params={
+        #         "reward_name": "object_linvel_penalty",
+        #         "metric_name": "rotation_progress",
+        #         "progress_min": 0.05,
+        #         "progress_max": 0.25,
+        #         "weight_min": -0.03,
+        #         "weight_max": -0.3,
+        #         "ema_alpha": 0.08,
+        #         "weight_lerp": 0.15,
+        #     },
+        # ),
+        # "pose_diff_penalty_weight": CurriculumTermCfg(
+        #     func=hand_cube_mdp.reward_weight_by_metric_progress,
+        #     params={
+        #         "reward_name": "pose_diff_penalty",
+        #         "metric_name": "rotation_progress",
+        #         "progress_min": 0.05,
+        #         "progress_max": 0.25,
+        #         "weight_min": -0.02, # -0.01
+        #         "weight_max": -0.2, # -0.1
+        #         "ema_alpha": 0.08,
+        #         "weight_lerp": 0.15,
+        #     },
+        # ),
+        # "torque_penalty_weight": CurriculumTermCfg(
+        #     func=hand_cube_mdp.reward_weight_by_metric_progress,
+        #     params={
+        #         "reward_name": "torque_penalty",
+        #         "metric_name": "rotation_progress",
+        #         "progress_min": 0.05,
+        #         "progress_max": 0.25,
+        #         "weight_min": -0.1,
+        #         "weight_max": -1.0,
+        #         "ema_alpha": 0.08,
+        #         "weight_lerp": 0.15,
+        #     },
+        # ),
+        # "work_penalty_weight": CurriculumTermCfg(
+        #     func=hand_cube_mdp.reward_weight_by_metric_progress,
+        #     params={
+        #         "reward_name": "work_penalty",
+        #         "metric_name": "rotation_progress",
+        #         "progress_min": 0.05,
+        #         "progress_max": 0.25,
+        #         "weight_min": -0.01,
+        #         "weight_max": -0.1,
+        #         "ema_alpha": 0.08,
+        #         "weight_lerp": 0.15,
+        #     },
+        # ),
     }
 
     # -------------------------------------------------------------------------
@@ -562,7 +606,7 @@ def make_hand_cube_inhand_rotate_env_cfg(
                 terrain_type="plane",
             ),
             entities={},
-            num_envs=1,
+            num_envs=2048,
             env_spacing=0.6,
         ),
         observations=observations,
@@ -578,8 +622,8 @@ def make_hand_cube_inhand_rotate_env_cfg(
             entity_name="robot",
             body_name=palm_body_name,
             distance=0.45,
-            elevation=-25,
-            azimuth=110,
+            elevation=-90, # -25
+            azimuth=90, # 110
         ),
         sim=SimulationCfg(
             nconmax=200,
