@@ -31,6 +31,10 @@ class PlayConfig:
   device: str | None = None
   video: bool = False
   video_length: int = 200
+  # Playback fps of the saved mp4 (separate from the 20 Hz control rate). The
+  # recorder defaults to env.metadata["render_fps"] = 1/step_dt = 20, which
+  # plays back in real time but looks choppy; raise it for a smoother clip.
+  video_fps: int | None = None
   video_height: int | None = None
   video_width: int | None = None
   camera: int | str | None = None
@@ -160,12 +164,21 @@ def run_play(task_id: str, cfg: PlayConfig):
   if TRAINED_MODE and cfg.video:
     print("[INFO] Recording videos during play")
     assert log_dir is not None  # log_dir is set in TRAINED_MODE block
+    if cfg.video_fps is not None:
+      # VideoRecorder reads the playback fps from env.metadata["render_fps"],
+      # which the env sets to 1/step_dt (20 Hz). Override it before wrapping.
+      env.metadata["render_fps"] = int(cfg.video_fps)
+    print(
+      f"[INFO] Video: length={cfg.video_length} steps, "
+      f"fps={env.metadata.get('render_fps')}, "
+      f"duration={cfg.video_length / float(env.metadata.get('render_fps', 30)):.1f}s"
+    )
     env = VideoRecorder(
       env,
       video_folder=log_dir / "videos" / "play",
       step_trigger=lambda step: step == 0,
       video_length=cfg.video_length,
-      disable_logger=True,
+      disable_logger=False,
     )
 
   env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
