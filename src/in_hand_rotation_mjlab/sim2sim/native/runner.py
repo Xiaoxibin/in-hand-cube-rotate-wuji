@@ -37,6 +37,9 @@ class NativeMujocoSim2SimRunner:
           checkpoint_file=cfg.checkpoint_file,
           device=cfg.device,
           play=cfg.play,
+          # The native client evaluates joint_pos_rel itself, so the server
+          # must NOT subtract default_joint_pos a second time.
+          raw_joint_pos_obs=False,
         ),
         action_term_metadata=self.client.build_server_action_metadata(),
         step_dt=self.client.step_dt,
@@ -55,6 +58,8 @@ class NativeMujocoSim2SimRunner:
       self._remote_server.init(
         step_dt=self.client.step_dt,
         max_episode_steps=self.client.max_episode_steps,
+        # Same convention as the in-process server above.
+        raw_joint_pos_obs=False,
       )
 
   def rollout_description(self) -> str:

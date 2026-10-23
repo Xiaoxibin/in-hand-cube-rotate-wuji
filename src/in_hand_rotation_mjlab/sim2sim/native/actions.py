@@ -376,7 +376,12 @@ class _JointPositionDeltaActionTerm(_BaseJointActionTerm):
         "Invalid commanded joint position shape for delta term. "
         f"Expected (1, {self.action_dim}), got {tuple(target.shape)}."
       )
-    self._prev_target = self._target.clone()
+    # `_prev_target` is the interpolation START for the upcoming substep loop.
+    # It must be the target actually applied at the END of the PREVIOUS step's
+    # substep loop (set in `apply_substep`), NOT the new target. Overwriting it
+    # with the new target makes alpha-interpolation collapse to a constant,
+    # so the joint target steps instantly instead of ramping over the
+    # decimation substeps -- which is not what the policy was trained with.
     self._target = target.clone()
     self._apply_target_limits()
     self._processed_action = self._target.clone()
@@ -393,6 +398,10 @@ class _JointPositionDeltaActionTerm(_BaseJointActionTerm):
       alpha = (self._substep_counter + 1) / decimation
       command = (1.0 - alpha) * self._prev_target + alpha * self._processed_action
       self._substep_counter += 1
+      # Once the ramp completes, the applied target becomes the next step's
+      # interpolation start.
+      if self._substep_counter >= decimation:
+        self._prev_target = self._processed_action.clone()
     else:
       command = self._processed_action
     if self._uses_motor_pd:

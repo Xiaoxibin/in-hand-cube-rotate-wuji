@@ -64,14 +64,17 @@ class PolicyZmqClient:
     *,
     step_dt: float,
     max_episode_steps: int,
+    raw_joint_pos_obs: bool | None = None,
   ) -> None:
-    self._request(
-      {
-        "type": "init",
-        "step_dt": float(step_dt),
-        "max_episode_steps": int(max_episode_steps),
-      }
-    )
+    payload: dict[str, Any] = {
+      "type": "init",
+      "step_dt": float(step_dt),
+      "max_episode_steps": int(max_episode_steps),
+    }
+    # None keeps the server's configured convention (backward compatible).
+    if raw_joint_pos_obs is not None:
+      payload["raw_joint_pos_obs"] = bool(raw_joint_pos_obs)
+    self._request(payload)
 
   def reset(self, observation: ObservationPacket) -> None:
     self._request(
@@ -201,9 +204,18 @@ class PolicyZmqServer:
 
     if request_type == "init":
       metadata = self._get_action_metadata()
+      # The client may override the observation convention: native sim2sim
+      # sends joint_pos_rel, real hardware sends absolute joint positions.
+      cfg = self.cfg
+      if "raw_joint_pos_obs" in request:
+        from dataclasses import replace
+
+        cfg = replace(
+          cfg, raw_joint_pos_obs=bool(request["raw_joint_pos_obs"])
+        )
       self._server = MjlabPolicyServer(
         task_id=self.task_id,
-        cfg=self.cfg,
+        cfg=cfg,
         action_term_metadata=metadata,
         step_dt=float(request["step_dt"]),
         max_episode_steps=int(request["max_episode_steps"]),
