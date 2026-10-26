@@ -44,6 +44,7 @@ env/
 
 # MuJoCo
 *.mjb
+*.TXT
 
 # Training outputs
 logs/
@@ -64,7 +65,6 @@ Thumbs.db
 # Others
 data/
 docs/
-MyReadMe.md
 pyproject.toml.bak
 
 
