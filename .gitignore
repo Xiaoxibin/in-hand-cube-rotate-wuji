@@ -70,3 +70,8 @@ pyproject.toml.bak
 
 # Local run artifacts
 cuda:*/
+
+# Local scratch files
+mjmodel.xml
+screenshot.png
+wuji.odt
