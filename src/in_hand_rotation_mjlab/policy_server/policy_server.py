@@ -57,19 +57,11 @@ class MjlabPolicyServer:
     actor_obs_cfg = self.env_cfg.observations["actor"]
     # For obs terms whose name matches an action term, subtract that action
     # term's default_joint_pos so the client can send raw joint positions.
-    #
-    # This is ONLY valid when the client sends absolute joint positions. The
-    # native sim2sim client sends joint_pos_rel (already relative to the
-    # default pose) and sets raw_joint_pos_obs=False; subtracting the default
-    # pose again there sign-flips the term and pushes the policy out of
-    # distribution.
-    term_offsets = None
-    if self.cfg.raw_joint_pos_obs:
-      term_offsets = {
-        ts.term_name: ts.mapper.metadata.default_joint_pos
-        for ts in self.action_mapper._term_mappers
-        if ts.term_name in actor_obs_cfg.terms
-      }
+    term_offsets = {
+      ts.term_name: ts.mapper.metadata.default_joint_pos
+      for ts in self.action_mapper._term_mappers
+      if ts.term_name in actor_obs_cfg.terms
+    }
     self.obs_processor = ActorObservationProcessor(
       obs_group_cfg=actor_obs_cfg,
       device=self.device,
