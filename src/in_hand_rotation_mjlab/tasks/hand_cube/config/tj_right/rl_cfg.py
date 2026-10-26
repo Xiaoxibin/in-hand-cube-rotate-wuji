@@ -39,7 +39,7 @@ def tj_right_hand_cube_rotate_ppo_cfg() -> RslRlOnPolicyRunnerCfg:
             # 回退到蓝色 2026-10-21_15-58-28 基线:该轮是唯一验证过的稳定
             # 起点(净转角 ~3.05 rad/ep, cube_stalled=0)。黄色 10-22 轮把它
             # 抬到 0.001 并同时改了 6 个奖励参数,无法归因。
-            entropy_coef=0.0005, # 0.001(黄色) -> 0.0005(蓝色)
+            entropy_coef=0.003, # 0.001(黄色) -> 0.0005(蓝色)
             num_learning_epochs=5,
             num_mini_batches=4,
             # 同蓝色基线。注意 adaptive 分支每次都把 param_group lr 重写为

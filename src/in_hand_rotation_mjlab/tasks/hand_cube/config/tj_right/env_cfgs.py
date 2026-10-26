@@ -25,7 +25,7 @@ GRASP_CACHE_FILE = ("tasks/hand_cube/cache/tj_right_grasp_cache_31_filtered.npz"
 # Robustness knobs (radians). See _apply_tj_robustness_tuning for the rationale.
 # Reset-time joint perturbation: roughly the observed sim2sim-vs-training engine
 # gap, comfortably inside the grasp-cache stability basin.
-RESET_JOINT_NOISE_RAD = 0.05
+RESET_JOINT_NOISE_RAD = 0.02
 # Proprioception noise: shared config uses 0.01; widened for the same reason.
 OBS_JOINT_POS_NOISE_RAD = 0.02
 # =============================================================================

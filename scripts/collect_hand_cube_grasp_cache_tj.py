@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import tyro
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg
+from mjlab.utils.lab_api.math import euler_xyz_from_quat
 from mjlab.utils.torch import configure_torch_backends
 
 
@@ -36,7 +38,7 @@ TJ_FINGER_COLLISION_EXPR = (
 
 @dataclass(frozen=True)
 class CollectConfig:
-    out_file: str = "src/in_hand_rotation_mjlab/tasks/hand_cube/cache/tj_right_grasp_cache_33.npz"
+    out_file: str = "src/in_hand_rotation_mjlab/tasks/hand_cube/cache/tj_right_grasp_cache_31_filtered.npz"
     num_envs: int = 256
     settle_steps: int = 240
     device: str | None = None
@@ -49,6 +51,7 @@ class CollectConfig:
     palm_center_geom_expr: str | None = None
     max_palm_distance: float = 0.14
     min_cube_height: float = 0.05
+    max_settle_tilt_deg: float = 20.0
 
 
 def run_collect(task_id: str, cfg: CollectConfig) -> None:
@@ -126,6 +129,14 @@ def run_collect(task_id: str, cfg: CollectConfig) -> None:
         cube_lin_vel_w = cube.data.root_link_lin_vel_w
         cube_ang_vel_w = cube.data.root_link_ang_vel_w
 
+        # Attitude filter: reject grasps where the cube settled visibly tilted.
+        # Tilted cache entries bias every training episode's "initial pose"
+        # (drift penalty / terminations / rotation_progress all reference it),
+        # and roll>20deg entries sit with a corner on the thumb-metacarpal
+        # ridge, pre-biasing episodes toward the pocket.
+        roll_e, pitch_e, _ = euler_xyz_from_quat(cube_quat_w)
+        max_settle_tilt_rad = math.radians(cfg.max_settle_tilt_deg)
+
         if use_palm_geom_center:
             palm_center_w = robot.data.geom_pos_w[:, palm_geom_ids].mean(dim=1)
         else:
@@ -139,6 +150,8 @@ def run_collect(task_id: str, cfg: CollectConfig) -> None:
         stable &= torch.norm(cube_ang_vel_w, dim=-1) <= cfg.ang_vel_threshold
         stable &= cube_dist <= cfg.max_palm_distance
         stable &= cube_pos_w[:, 2] >= cfg.min_cube_height
+        stable &= roll_e.abs() <= max_settle_tilt_rad
+        stable &= pitch_e.abs() <= max_settle_tilt_rad
 
         assert fingertip_sensor.data.found is not None
         assert debug_sensor.data.found is not None

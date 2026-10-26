@@ -51,7 +51,6 @@ runs/
 checkpoints/
 wandb/
 tensorboard/
-docs/
 
 # System
 .DS_Store
@@ -68,5 +67,6 @@ docs/
 MyReadMe.md
 pyproject.toml.bak
 
-MyReadMe.md
-pyproject.toml.bak
+
+# Local run artifacts
+cuda:*/

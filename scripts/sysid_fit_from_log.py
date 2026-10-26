@@ -1,17 +1,25 @@
 """Fit mjwarp hand dynamics to real logs by replaying commanded joint positions.
 
-Finger-focused system ID for LEAP hand Ideal PD actuators.
+Robot-agnostic in principle: the sim model comes from the chosen TASK's env
+cfg, so `Mjlab-TJ-Right-HandCube-Rotate` replays the TJ hand and a LEAP task
+would replay LEAP. Input is the NPZ produced by the matching collector
+(real_world/tj2_sysid_collect.py for TJ: keys time/hand_cmd/hand_state).
 
-For the selected finger, this fits 5 parameters per joint (20 params/finger):
-  - stiffness
-  - damping
+For the selected finger, this fits 5 parameters per joint:
+  - stiffness (kp)
+  - damping (kd)
   - effort_limit
   - armature
   - frictionloss
 
-All parameters are sampled as multiplicative scales around baseline values from
-configured LEAP constants/articulation. A global integer actuator delay
-(control steps) is also optimized.
+Output NPZ contains the fitted ABSOLUTE per-joint values (fitted_*), the
+per-joint multiplicative scales (best_*_scale), the baselines, the global
+actuator delay in control steps, and per-joint RMSEs.
+
+NOTE: joint-index mapping and the default remap are TJ-specific as of
+2026-10-21 (the old mapping was LEAP 16-DoF and silently fit the wrong
+joints on TJ). Pass --apply-joint-swap-remap / --apply-thumb-cmc-negate
+explicitly for LEAP logs.
 """
 
 from __future__ import annotations
@@ -43,7 +51,8 @@ class SysIdFitCliConfig:
   optimizer: Literal["random", "cem"] = "cem"
 
   # Finger-specific calibration target.
-  finger: Literal["index", "middle", "ring", "thumb", "all"] = "index"
+  # TJ 21-DoF layout (see _finger_joint_ids); pinky added, LEAP had none.
+  finger: Literal["thumb", "index", "middle", "ring", "pinky", "all"] = "thumb"
 
   # Global actuator delay (not per-joint), in control steps.
   optimize_delay: bool = True
@@ -64,9 +73,14 @@ class SysIdFitCliConfig:
   friction_scale_max: float = 2.2
 
   # Joint-order/sign remap from hardware log to sim convention.
-  # Swaps are needed for index/middle/ring and thumb negate.
-  apply_joint_swap_remap: bool = True
-  apply_thumb_cmc_negate: bool = True
+  # LEAP-only: swaps for index/middle/ring + thumb CMC negate, and the remap
+  # function requires exactly 16 columns (LEAP). The TJ hand already logs in
+  # sim order with identity signs (see tj2_interface.py), so both default off
+  # now. Set them on the CLI only when fitting a LEAP log.
+  # apply_joint_swap_remap: bool = True
+  # apply_thumb_cmc_negate: bool = True
+  apply_joint_swap_remap: bool = False
+  apply_thumb_cmc_negate: bool = False
 
   # CEM options.
   cem_population: int | None = None
@@ -202,12 +216,18 @@ def _best_shift_rmse(
 
 
 def _finger_joint_ids(finger: str) -> np.ndarray:
+  # TJ Hand (21 DoF), matching TJ_JOINT_ORDER / SDK Hand2JointIndex:
+  #   thumb 0-4 (5 joints, 0=CMC1), index 5-8, middle 9-12, ring 13-16,
+  #   pinky 17-20.
+  # NOTE: this used to be the LEAP 16-DoF layout (index 0-3, ..., thumb 12-15,
+  # no pinky). Those indices silently fit the WRONG joints on the TJ hand.
   mapping = {
-    "index": np.asarray([0, 1, 2, 3], dtype=np.int64),
-    "middle": np.asarray([4, 5, 6, 7], dtype=np.int64),
-    "ring": np.asarray([8, 9, 10, 11], dtype=np.int64),
-    "thumb": np.asarray([12, 13, 14, 15], dtype=np.int64),
-    "all": np.asarray(list(range(16)), dtype=np.int64),
+    "thumb": np.asarray([0, 1, 2, 3, 4], dtype=np.int64),
+    "index": np.asarray([5, 6, 7, 8], dtype=np.int64),
+    "middle": np.asarray([9, 10, 11, 12], dtype=np.int64),
+    "ring": np.asarray([13, 14, 15, 16], dtype=np.int64),
+    "pinky": np.asarray([17, 18, 19, 20], dtype=np.int64),
+    "all": np.asarray(list(range(21)), dtype=np.int64),
   }
   return mapping[finger]
 

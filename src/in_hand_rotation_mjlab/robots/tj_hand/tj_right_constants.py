@@ -155,7 +155,7 @@ TJ_HOME_JOINT_POS: dict[str, float] = {
 
     # ===== 小指:内收靠拢(MCPS2 -0.27→-0.35) =====
     "MCPS2": -0.15,
-    "MCPS1": -1.30,
+    "MCPS1": -1.30,  # -1.30
     "PIPS":  -0.82,
     "DIPS":  -0.611,
 }
